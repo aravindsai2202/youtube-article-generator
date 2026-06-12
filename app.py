@@ -39,7 +39,11 @@ if st.button("🚀 Generate Article"):
     if youtube_url:
 
         with st.spinner("📥 Fetching Transcript..."):
-            transcript = get_transcript(youtube_url)
+            try:
+                transcript = get_transcript(youtube_url)
+            except ValueError as e:
+                st.error(f"❌ {e}")
+                st.stop()
 
         st.success("Transcript Retrieved Successfully")
 

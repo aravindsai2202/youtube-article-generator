@@ -20,6 +20,10 @@ st.markdown("""
     height:50px; font-size:18px; font-weight:bold;
 }
 .result-box { background:#1E1E1E; padding:20px; border-radius:15px; border:1px solid #333; }
+.proxy-badge-on  { background:#1a3a1a; border:1px solid #4CAF50; color:#4CAF50;
+                   padding:6px 14px; border-radius:8px; font-size:13px; display:inline-block; }
+.proxy-badge-off { background:#3a1a1a; border:1px solid #e05252; color:#e05252;
+                   padding:6px 14px; border-radius:8px; font-size:13px; display:inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,23 +33,46 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# --- Proxy status indicator ---
+proxy_user = st.secrets.get("PROXY_USER", "")
+proxy_pass = st.secrets.get("PROXY_PASS", "")
+
+if proxy_user and proxy_pass:
+    st.markdown(
+        '<div class="proxy-badge-on">🔒 Proxy: Active (WebShare)</div>',
+        unsafe_allow_html=True
+    )
+else:
+    st.markdown(
+        '<div class="proxy-badge-off">⚠️ Proxy: Not configured — transcript fetching may fail on cloud deployments. '
+        'Add PROXY_USER & PROXY_PASS to Streamlit secrets.</div>',
+        unsafe_allow_html=True
+    )
+
+st.markdown("---")
+
 youtube_url = st.text_input(
     "🔗 Enter YouTube Video URL",
     placeholder="https://youtube.com/watch?v=..."
 )
 
 if st.button("🚀 Generate Article"):
-
     if youtube_url:
-
         with st.spinner("📥 Fetching Transcript..."):
             try:
                 transcript = get_transcript(youtube_url)
             except ValueError as e:
                 st.error(f"❌ {e}")
+                if not (proxy_user and proxy_pass):
+                    st.info(
+                        "💡 **Fix:** Add a WebShare proxy to your Streamlit secrets.\n\n"
+                        "1. Sign up free at https://webshare.io\n"
+                        "2. Go to **Streamlit Cloud → App Settings → Secrets**\n"
+                        "3. Add:\n```\nPROXY_USER = \"your_username\"\nPROXY_PASS = \"your_password\"\n```"
+                    )
                 st.stop()
 
-        st.success("Transcript Retrieved Successfully")
+        st.success("✅ Transcript Retrieved Successfully")
 
         with st.spinner("🤖 Generating AI Article... (may retry if server is busy)"):
             try:
@@ -54,7 +81,7 @@ if st.button("🚀 Generate Article"):
                 st.error("❌ Failed to generate article after multiple attempts. Please try again in a moment.")
                 st.stop()
 
-        st.success("Article Generated Successfully")
+        st.success("✅ Article Generated Successfully")
 
         pdf_file = generate_pdf(article)
 
@@ -78,6 +105,5 @@ if st.button("🚀 Generate Article"):
             )
 
         st.balloons()
-
     else:
-        st.warning("Please Enter a YouTube URL")
+        st.warning("⚠️ Please Enter a YouTube URL")

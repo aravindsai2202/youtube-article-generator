@@ -2,7 +2,7 @@ import streamlit as st
 from modules.transcript import get_transcript
 from modules.summarizer import generate_summary
 from modules.pdf_generator import generate_pdf
-
+st.write("PROXY_USER:", st.secrets.get("PROXY_USER", "NOT FOUND"))
 st.set_page_config(
     page_title="YouTube AI Article Generator",
     page_icon="🚀",

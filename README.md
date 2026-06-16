@@ -79,13 +79,6 @@ youtube-article-generator/
 └── pdf_generator.py    # Generate PDF from article
 
 ---
-
-## 🔑 Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `GEMINI_API_KEY` | Your Google Gemini API key |
-
 ---
 
 ## 👨‍💻 Author

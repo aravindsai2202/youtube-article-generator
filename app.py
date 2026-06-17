@@ -7,8 +7,9 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import tempfile
 import re
+import xml.etree.ElementTree as ET
+import requests
 
-# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="YouTube AI Article Generator", page_icon="🎥", layout="centered")
 
 st.markdown("""
@@ -27,7 +28,7 @@ st.markdown('<div class="title">🎥 YouTube AI Article Generator</div>', unsafe
 st.markdown('<div class="subtitle">Convert any YouTube video into a professional AI-generated article & PDF</div>', unsafe_allow_html=True)
 st.markdown("---")
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def extract_video_id(url: str) -> str:
     patterns = [
         r"(?:v=)([0-9A-Za-z_-]{11})",
@@ -38,45 +39,59 @@ def extract_video_id(url: str) -> str:
         m = re.search(p, url)
         if m:
             return m.group(1)
-    raise ValueError("Invalid YouTube URL — could not extract video ID.")
+    raise ValueError("Invalid YouTube URL.")
 
 
-def get_captions(video_id: str, yt_api_key: str) -> str:
-    """Fetch auto-generated or manual captions via YouTube Data API v3."""
+def get_transcript_via_api(video_id: str, yt_api_key: str) -> str:
+    """Get caption track URL via YouTube Data API, then fetch content directly."""
     youtube = build("youtube", "v3", developerKey=yt_api_key)
 
-    # Get caption tracks
-    captions_response = youtube.captions().list(
+    # List caption tracks
+    response = youtube.captions().list(
         part="snippet",
         videoId=video_id
     ).execute()
 
-    tracks = captions_response.get("items", [])
+    tracks = response.get("items", [])
     if not tracks:
-        raise ValueError("No captions found for this video. Try a video with subtitles enabled.")
+        raise ValueError("No captions found for this video.")
 
-    # Prefer English
-    track_id = None
+    # Get video page to extract timedtext URL
+    # Use YouTube's timedtext endpoint (public, no auth needed)
+    lang = None
     for track in tracks:
-        lang = track["snippet"]["language"]
-        if lang.startswith("en"):
-            track_id = track["id"]
+        if track["snippet"]["language"].startswith("en"):
+            lang = track["snippet"]["language"]
             break
-    if not track_id:
-        track_id = tracks[0]["id"]
+    if not lang:
+        lang = tracks[0]["snippet"]["language"]
 
-    # Download caption content
-    caption_content = youtube.captions().download(
-        id=track_id,
-        tfmt="srt"
-    ).execute()
+    # Fetch captions via timedtext endpoint
+    timedtext_url = f"https://www.youtube.com/api/timedtext?lang={lang}&v={video_id}&fmt=json3"
+    r = requests.get(timedtext_url, headers={"User-Agent": "Mozilla/5.0"})
 
-    # Clean SRT formatting
-    text = caption_content.decode("utf-8") if isinstance(caption_content, bytes) else caption_content
-    text = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', text)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\n+', ' ', text).strip()
-    return text
+    if r.status_code != 200 or not r.text.strip():
+        # Try without fmt parameter
+        timedtext_url = f"https://www.youtube.com/api/timedtext?lang={lang}&v={video_id}"
+        r = requests.get(timedtext_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    if not r.text.strip():
+        raise ValueError("Could not fetch captions. This video may not have English subtitles.")
+
+    # Parse XML response
+    try:
+        root = ET.fromstring(r.text)
+        texts = [elem.text for elem in root.iter('text') if elem.text]
+        transcript = " ".join(texts)
+        transcript = re.sub(r'\s+', ' ', transcript).strip()
+        return transcript
+    except ET.ParseError:
+        # Try as plain text
+        text = re.sub(r'<[^>]+>', '', r.text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        if text:
+            return text
+        raise ValueError("Could not parse captions for this video.")
 
 
 def generate_article(transcript: str, gemini_key: str) -> str:
@@ -108,17 +123,14 @@ def create_pdf(article: str) -> str:
     head_style  = ParagraphStyle('Head',  parent=styles['Heading2'], fontSize=13, spaceBefore=12, spaceAfter=6)
 
     story = []
-    lines = article.split('\n')
-    for line in lines:
+    for line in article.split('\n'):
         line = line.strip()
         if not line:
             story.append(Spacer(1, 6))
         elif line.startswith('# '):
             story.append(Paragraph(line[2:], title_style))
-        elif line.startswith('## '):
-            story.append(Paragraph(line[3:], head_style))
-        elif line.startswith('### '):
-            story.append(Paragraph(line[4:], head_style))
+        elif line.startswith('## ') or line.startswith('### '):
+            story.append(Paragraph(re.sub(r'^#{2,3} ', '', line), head_style))
         else:
             line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
             story.append(Paragraph(line, body_style))
@@ -138,24 +150,24 @@ if st.button("🚀 Generate Article"):
             yt_key     = st.secrets["YOUTUBE_API_KEY"]
             gemini_key = st.secrets["GEMINI_API_KEY"]
         except KeyError as e:
-            st.error(f"❌ Missing secret: {e}. Add it in Streamlit Cloud → Settings → Secrets.")
+            st.error(f"❌ Missing secret: {e}")
             st.stop()
 
-        with st.spinner("📥 Fetching captions via YouTube API..."):
+        with st.spinner("📥 Fetching captions..."):
             try:
                 video_id   = extract_video_id(youtube_url)
-                transcript = get_captions(video_id, yt_key)
-                st.success("✅ Captions fetched successfully!")
+                transcript = get_transcript_via_api(video_id, yt_key)
+                st.success("✅ Captions fetched!")
             except Exception as e:
                 st.error(f"❌ {e}")
                 st.stop()
 
-        with st.spinner("🤖 Generating AI article with Gemini..."):
+        with st.spinner("🤖 Generating article with Gemini..."):
             try:
                 article = generate_article(transcript, gemini_key)
                 st.success("✅ Article generated!")
             except Exception as e:
-                st.error(f"❌ Gemini error: {e}")
+                st.error(f"❌ {e}")
                 st.stop()
 
         col1, col2, col3 = st.columns(3)

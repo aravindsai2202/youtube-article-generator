@@ -1,7 +1,6 @@
 import re
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig
 
 
 def extract_video_id(url: str) -> str:
@@ -21,22 +20,21 @@ def extract_video_id(url: str) -> str:
 def get_youtube_api(use_proxy: bool = True) -> YouTubeTranscriptApi:
     """
     Returns a YouTubeTranscriptApi instance.
-    If proxy credentials are available in Streamlit secrets, uses WebShare proxy.
+    Uses direct proxy URL with specific IP and port from Streamlit secrets.
     Falls back to direct connection if no proxy configured.
     """
     if use_proxy:
         try:
             proxy_user = st.secrets.get("PROXY_USER", "")
             proxy_pass = st.secrets.get("PROXY_PASS", "")
+            proxy_host = st.secrets.get("PROXY_HOST", "38.154.203.95")
+            proxy_port = st.secrets.get("PROXY_PORT", "5863")
 
             if proxy_user and proxy_pass:
-                proxy_config = WebshareProxyConfig(
-                    proxy_username=proxy_user,
-                    proxy_password=proxy_pass,
-                )
-                return YouTubeTranscriptApi(proxies=proxy_config)
+                proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}/"
+                return YouTubeTranscriptApi(proxies={"http": proxy_url, "https": proxy_url})
         except Exception:
-            pass  # Secrets not configured or proxy init failed
+            pass
 
     return YouTubeTranscriptApi()
 
@@ -44,12 +42,11 @@ def get_youtube_api(use_proxy: bool = True) -> YouTubeTranscriptApi:
 def get_transcript(url: str) -> str:
     """
     Fetch transcript for a YouTube video URL.
-    Tries with proxy first (if configured), falls back to direct if proxy fails.
+    Tries with proxy first, falls back to direct if proxy fails.
     Returns transcript as a single string.
     """
     video_id = extract_video_id(url)
 
-    # Try with proxy first
     for use_proxy in [True, False]:
         try:
             api = get_youtube_api(use_proxy=use_proxy)
@@ -59,16 +56,13 @@ def get_transcript(url: str) -> str:
         except Exception as e:
             error_msg = str(e)
 
-            # If proxy attempt failed, try without proxy
             if use_proxy:
                 continue
 
-            # Final failure — raise a clean error
             if "Could not retrieve a transcript" in error_msg:
                 raise ValueError(
                     "Could not fetch transcript. This video may have no captions, "
-                    "or YouTube is blocking requests from this server. "
-                    "Try adding a WebShare proxy in Streamlit secrets (PROXY_USER / PROXY_PASS)."
+                    "or YouTube is blocking requests from this server."
                 )
             else:
                 raise ValueError(f"Could not fetch transcript: {error_msg}")

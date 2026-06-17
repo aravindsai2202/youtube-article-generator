@@ -7,7 +7,6 @@ from reportlab.lib.units import inch
 import tempfile
 import re
 import requests
-import json
 
 st.set_page_config(page_title="YouTube AI Article Generator", page_icon="🎥", layout="centered")
 
@@ -41,108 +40,26 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Invalid YouTube URL.")
 
 
-def get_transcript(video_id: str) -> str:
-    """Fetch transcript using YouTube innertube API."""
-    
-    # Step 1: Get the video page to extract caption URL
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    })
+def get_transcript(video_id: str, supadata_key: str) -> str:
+    """Fetch transcript using Supadata API."""
+    url = f"https://api.supadata.ai/v1/youtube/transcript"
+    headers = {"x-api-key": supadata_key}
+    params = {"videoId": video_id, "text": "true"}
 
-    # Use innertube API
-    payload = {
-        "context": {
-            "client": {
-                "clientName": "WEB",
-                "clientVersion": "2.20240101",
-                "hl": "en",
-                "gl": "US",
-            }
-        },
-        "videoId": video_id,
-    }
-
-    r = session.post(
-        "https://www.youtube.com/youtubei/v1/get_transcript",
-        json=payload,
-        params={"key": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"}
-    )
+    r = requests.get(url, headers=headers, params=params)
 
     if r.status_code == 200:
         data = r.json()
-        # Extract text from transcript response
-        try:
-            transcript_parts = []
-            actions = data.get("actions", [])
-            for action in actions:
-                segments = action.get("updateEngagementPanelAction", {}) \
-                               .get("content", {}) \
-                               .get("transcriptRenderer", {}) \
-                               .get("body", {}) \
-                               .get("transcriptBodyRenderer", {}) \
-                               .get("cueGroups", [])
-                for group in segments:
-                    cues = group.get("transcriptCueGroupRenderer", {}).get("cues", [])
-                    for cue in cues:
-                        text = cue.get("transcriptCueRenderer", {}) \
-                                  .get("cue", {}) \
-                                  .get("simpleText", "")
-                        if text:
-                            transcript_parts.append(text)
-            
-            if transcript_parts:
-                return " ".join(transcript_parts)
-        except Exception:
-            pass
-
-    # Step 2: Fallback — scrape caption URL from video page
-    page = session.get(f"https://www.youtube.com/watch?v={video_id}")
-    html = page.text
-
-    # Find caption tracks in page source
-    match = re.search(r'"captionTracks":\[(.*?)\]', html)
-    if not match:
-        raise ValueError(
-            "No captions found for this video.\n\n"
-            "💡 Try a video that has subtitles/captions enabled."
-        )
-
-    captions_json = "[" + match.group(1) + "]"
-    tracks = json.loads(captions_json)
-
-    # Pick English track
-    base_url = None
-    for track in tracks:
-        lang = track.get("languageCode", "")
-        if lang.startswith("en"):
-            base_url = track.get("baseUrl")
-            break
-    if not base_url:
-        base_url = tracks[0].get("baseUrl")
-
-    if not base_url:
-        raise ValueError("Could not find caption URL.")
-
-    # Fetch and parse captions
-    cap_response = session.get(base_url + "&fmt=json3")
-    cap_data = cap_response.json()
-    
-    texts = []
-    for event in cap_data.get("events", []):
-        for seg in event.get("segs", []):
-            t = seg.get("utf8", "").strip()
-            if t and t != "\n":
-                texts.append(t)
-
-    transcript = " ".join(texts)
-    transcript = re.sub(r'\s+', ' ', transcript).strip()
-
-    if not transcript:
-        raise ValueError("Captions were empty for this video.")
-
-    return transcript
+        transcript = data.get("content", "")
+        if isinstance(transcript, list):
+            transcript = " ".join([t.get("text", "") for t in transcript])
+        if transcript:
+            return transcript.strip()
+        raise ValueError("Transcript is empty for this video.")
+    elif r.status_code == 404:
+        raise ValueError("No transcript found. Try a video with captions enabled.")
+    else:
+        raise ValueError(f"Supadata API error: {r.status_code} — {r.text}")
 
 
 def generate_article(transcript: str, gemini_key: str) -> str:
@@ -190,7 +107,7 @@ def create_pdf(article: str) -> str:
     return tmp.name
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# ── UI ───────────────────────────────────────────────────────────────────────
 youtube_url = st.text_input("🔗 Enter YouTube Video URL", placeholder="https://youtube.com/watch?v=...")
 
 if st.button("🚀 Generate Article"):
@@ -198,16 +115,17 @@ if st.button("🚀 Generate Article"):
         st.warning("⚠️ Please enter a YouTube URL.")
     else:
         try:
-            gemini_key = st.secrets["GEMINI_API_KEY"]
+            gemini_key   = st.secrets["GEMINI_API_KEY"]
+            supadata_key = st.secrets["SUPADATA_API_KEY"]
         except KeyError as e:
             st.error(f"❌ Missing secret: {e}")
             st.stop()
 
-        with st.spinner("📥 Fetching captions..."):
+        with st.spinner("📥 Fetching transcript..."):
             try:
                 video_id   = extract_video_id(youtube_url)
-                transcript = get_transcript(video_id)
-                st.success("✅ Captions fetched!")
+                transcript = get_transcript(video_id, supadata_key)
+                st.success("✅ Transcript fetched!")
             except Exception as e:
                 st.error(f"❌ {e}")
                 st.stop()

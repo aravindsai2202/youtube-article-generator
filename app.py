@@ -1,5 +1,4 @@
 import streamlit as st
-from googleapiclient.discovery import build
 from google import genai
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -7,8 +6,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import tempfile
 import re
-import xml.etree.ElementTree as ET
 import requests
+import json
 
 st.set_page_config(page_title="YouTube AI Article Generator", page_icon="🎥", layout="centered")
 
@@ -42,56 +41,108 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Invalid YouTube URL.")
 
 
-def get_transcript_via_api(video_id: str, yt_api_key: str) -> str:
-    """Get caption track URL via YouTube Data API, then fetch content directly."""
-    youtube = build("youtube", "v3", developerKey=yt_api_key)
+def get_transcript(video_id: str) -> str:
+    """Fetch transcript using YouTube innertube API."""
+    
+    # Step 1: Get the video page to extract caption URL
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
 
-    # List caption tracks
-    response = youtube.captions().list(
-        part="snippet",
-        videoId=video_id
-    ).execute()
+    # Use innertube API
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240101",
+                "hl": "en",
+                "gl": "US",
+            }
+        },
+        "videoId": video_id,
+    }
 
-    tracks = response.get("items", [])
-    if not tracks:
-        raise ValueError("No captions found for this video.")
+    r = session.post(
+        "https://www.youtube.com/youtubei/v1/get_transcript",
+        json=payload,
+        params={"key": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"}
+    )
 
-    # Get video page to extract timedtext URL
-    # Use YouTube's timedtext endpoint (public, no auth needed)
-    lang = None
+    if r.status_code == 200:
+        data = r.json()
+        # Extract text from transcript response
+        try:
+            transcript_parts = []
+            actions = data.get("actions", [])
+            for action in actions:
+                segments = action.get("updateEngagementPanelAction", {}) \
+                               .get("content", {}) \
+                               .get("transcriptRenderer", {}) \
+                               .get("body", {}) \
+                               .get("transcriptBodyRenderer", {}) \
+                               .get("cueGroups", [])
+                for group in segments:
+                    cues = group.get("transcriptCueGroupRenderer", {}).get("cues", [])
+                    for cue in cues:
+                        text = cue.get("transcriptCueRenderer", {}) \
+                                  .get("cue", {}) \
+                                  .get("simpleText", "")
+                        if text:
+                            transcript_parts.append(text)
+            
+            if transcript_parts:
+                return " ".join(transcript_parts)
+        except Exception:
+            pass
+
+    # Step 2: Fallback — scrape caption URL from video page
+    page = session.get(f"https://www.youtube.com/watch?v={video_id}")
+    html = page.text
+
+    # Find caption tracks in page source
+    match = re.search(r'"captionTracks":\[(.*?)\]', html)
+    if not match:
+        raise ValueError(
+            "No captions found for this video.\n\n"
+            "💡 Try a video that has subtitles/captions enabled."
+        )
+
+    captions_json = "[" + match.group(1) + "]"
+    tracks = json.loads(captions_json)
+
+    # Pick English track
+    base_url = None
     for track in tracks:
-        if track["snippet"]["language"].startswith("en"):
-            lang = track["snippet"]["language"]
+        lang = track.get("languageCode", "")
+        if lang.startswith("en"):
+            base_url = track.get("baseUrl")
             break
-    if not lang:
-        lang = tracks[0]["snippet"]["language"]
+    if not base_url:
+        base_url = tracks[0].get("baseUrl")
 
-    # Fetch captions via timedtext endpoint
-    timedtext_url = f"https://www.youtube.com/api/timedtext?lang={lang}&v={video_id}&fmt=json3"
-    r = requests.get(timedtext_url, headers={"User-Agent": "Mozilla/5.0"})
+    if not base_url:
+        raise ValueError("Could not find caption URL.")
 
-    if r.status_code != 200 or not r.text.strip():
-        # Try without fmt parameter
-        timedtext_url = f"https://www.youtube.com/api/timedtext?lang={lang}&v={video_id}"
-        r = requests.get(timedtext_url, headers={"User-Agent": "Mozilla/5.0"})
+    # Fetch and parse captions
+    cap_response = session.get(base_url + "&fmt=json3")
+    cap_data = cap_response.json()
+    
+    texts = []
+    for event in cap_data.get("events", []):
+        for seg in event.get("segs", []):
+            t = seg.get("utf8", "").strip()
+            if t and t != "\n":
+                texts.append(t)
 
-    if not r.text.strip():
-        raise ValueError("Could not fetch captions. This video may not have English subtitles.")
+    transcript = " ".join(texts)
+    transcript = re.sub(r'\s+', ' ', transcript).strip()
 
-    # Parse XML response
-    try:
-        root = ET.fromstring(r.text)
-        texts = [elem.text for elem in root.iter('text') if elem.text]
-        transcript = " ".join(texts)
-        transcript = re.sub(r'\s+', ' ', transcript).strip()
-        return transcript
-    except ET.ParseError:
-        # Try as plain text
-        text = re.sub(r'<[^>]+>', '', r.text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        if text:
-            return text
-        raise ValueError("Could not parse captions for this video.")
+    if not transcript:
+        raise ValueError("Captions were empty for this video.")
+
+    return transcript
 
 
 def generate_article(transcript: str, gemini_key: str) -> str:
@@ -147,7 +198,6 @@ if st.button("🚀 Generate Article"):
         st.warning("⚠️ Please enter a YouTube URL.")
     else:
         try:
-            yt_key     = st.secrets["YOUTUBE_API_KEY"]
             gemini_key = st.secrets["GEMINI_API_KEY"]
         except KeyError as e:
             st.error(f"❌ Missing secret: {e}")
@@ -156,7 +206,7 @@ if st.button("🚀 Generate Article"):
         with st.spinner("📥 Fetching captions..."):
             try:
                 video_id   = extract_video_id(youtube_url)
-                transcript = get_transcript_via_api(video_id, yt_key)
+                transcript = get_transcript(video_id)
                 st.success("✅ Captions fetched!")
             except Exception as e:
                 st.error(f"❌ {e}")

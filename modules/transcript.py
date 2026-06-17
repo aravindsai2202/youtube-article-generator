@@ -1,7 +1,7 @@
-import os
 import re
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 
 def extract_video_id(url: str) -> str:
@@ -25,13 +25,17 @@ def get_transcript(url: str) -> str:
     proxy_host = st.secrets.get("PROXY_HOST", "38.154.203.95")
     proxy_port = st.secrets.get("PROXY_PORT", "5863")
 
-    if proxy_user and proxy_pass:
-        proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}/"
-        os.environ["HTTP_PROXY"] = proxy_url
-        os.environ["HTTPS_PROXY"] = proxy_url
-
     try:
-        api = YouTubeTranscriptApi()
+        if proxy_user and proxy_pass:
+            proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}/"
+            proxy_config = GenericProxyConfig(
+                http_url=proxy_url,
+                https_url=proxy_url,
+            )
+            api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            api = YouTubeTranscriptApi()
+
         transcript_list = api.fetch(video_id)
         text = " ".join([entry.text for entry in transcript_list])
         return text

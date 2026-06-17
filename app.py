@@ -81,7 +81,7 @@ def generate_article(transcript: str, groq_key: str) -> str:
 Make it informative, professional, and easy to read.
 
 Transcript:
-{transcript[:6000]}
+{transcript[:4000]}
 
 Write the full article now:"""
             }

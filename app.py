@@ -1,109 +1,173 @@
 import streamlit as st
-from modules.transcript import get_transcript
-from modules.summarizer import generate_summary
-from modules.pdf_generator import generate_pdf
-st.write("PROXY_USER:", st.secrets.get("PROXY_USER", "NOT FOUND"))
-st.set_page_config(
-    page_title="YouTube AI Article Generator",
-    page_icon="🚀",
-    layout="wide"
-)
+from googleapiclient.discovery import build
+from google import genai
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+import tempfile
+import re
+
+# ── Page config ──────────────────────────────────────────────────────────────
+st.set_page_config(page_title="YouTube AI Article Generator", page_icon="🎥", layout="centered")
 
 st.markdown("""
 <style>
-.main { background-color: #0E1117; }
-.title { text-align:center; font-size:42px; font-weight:bold; color:#4CAF50; }
-.subtitle { text-align:center; color:#BBBBBB; font-size:18px; margin-bottom:30px; }
+.title { text-align:center; font-size:40px; font-weight:bold; color:#4CAF50; }
+.subtitle { text-align:center; color:#BBBBBB; font-size:17px; margin-bottom:20px; }
 .stButton>button {
-    width:100%; background: linear-gradient(90deg,#4CAF50,#00C9A7);
+    width:100%; background:linear-gradient(90deg,#4CAF50,#00C9A7);
     color:white; border:none; border-radius:10px;
-    height:50px; font-size:18px; font-weight:bold;
+    height:48px; font-size:17px; font-weight:bold;
 }
-.result-box { background:#1E1E1E; padding:20px; border-radius:15px; border:1px solid #333; }
-.proxy-badge-on  { background:#1a3a1a; border:1px solid #4CAF50; color:#4CAF50;
-                   padding:6px 14px; border-radius:8px; font-size:13px; display:inline-block; }
-.proxy-badge-off { background:#3a1a1a; border:1px solid #e05252; color:#e05252;
-                   padding:6px 14px; border-radius:8px; font-size:13px; display:inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">🎥 YouTube AI Article Generator</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Convert any YouTube Video into a Professional AI Generated Article & PDF</div>',
-    unsafe_allow_html=True
-)
-
-# --- Proxy status indicator ---
-proxy_user = st.secrets.get("PROXY_USER", "")
-proxy_pass = st.secrets.get("PROXY_PASS", "")
-
-if proxy_user and proxy_pass:
-    st.markdown(
-        '<div class="proxy-badge-on">🔒 Proxy: Active (WebShare)</div>',
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown(
-        '<div class="proxy-badge-off">⚠️ Proxy: Not configured — transcript fetching may fail on cloud deployments. '
-        'Add PROXY_USER & PROXY_PASS to Streamlit secrets.</div>',
-        unsafe_allow_html=True
-    )
-
+st.markdown('<div class="subtitle">Convert any YouTube video into a professional AI-generated article & PDF</div>', unsafe_allow_html=True)
 st.markdown("---")
 
-youtube_url = st.text_input(
-    "🔗 Enter YouTube Video URL",
-    placeholder="https://youtube.com/watch?v=..."
-)
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def extract_video_id(url: str) -> str:
+    patterns = [
+        r"(?:v=)([0-9A-Za-z_-]{11})",
+        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
+        r"(?:embed\/)([0-9A-Za-z_-]{11})",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    raise ValueError("Invalid YouTube URL — could not extract video ID.")
+
+
+def get_captions(video_id: str, yt_api_key: str) -> str:
+    """Fetch auto-generated or manual captions via YouTube Data API v3."""
+    youtube = build("youtube", "v3", developerKey=yt_api_key)
+
+    # Get caption tracks
+    captions_response = youtube.captions().list(
+        part="snippet",
+        videoId=video_id
+    ).execute()
+
+    tracks = captions_response.get("items", [])
+    if not tracks:
+        raise ValueError("No captions found for this video. Try a video with subtitles enabled.")
+
+    # Prefer English
+    track_id = None
+    for track in tracks:
+        lang = track["snippet"]["language"]
+        if lang.startswith("en"):
+            track_id = track["id"]
+            break
+    if not track_id:
+        track_id = tracks[0]["id"]
+
+    # Download caption content
+    caption_content = youtube.captions().download(
+        id=track_id,
+        tfmt="srt"
+    ).execute()
+
+    # Clean SRT formatting
+    text = caption_content.decode("utf-8") if isinstance(caption_content, bytes) else caption_content
+    text = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\n+', ' ', text).strip()
+    return text
+
+
+def generate_article(transcript: str, gemini_key: str) -> str:
+    client = genai.Client(api_key=gemini_key)
+    prompt = f"""You are a professional content writer. Based on the transcript below, write a well-structured, 
+engaging article with a title, introduction, multiple sections with headings, and a conclusion.
+Make it informative, professional, and easy to read.
+
+Transcript:
+{transcript[:12000]}
+
+Write the full article now:"""
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
+    return response.text
+
+
+def create_pdf(article: str) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    doc = SimpleDocTemplate(tmp.name, pagesize=A4,
+                            rightMargin=inch, leftMargin=inch,
+                            topMargin=inch, bottomMargin=inch)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=16)
+    body_style  = ParagraphStyle('Body',  parent=styles['Normal'], fontSize=11, leading=16, spaceAfter=8)
+    head_style  = ParagraphStyle('Head',  parent=styles['Heading2'], fontSize=13, spaceBefore=12, spaceAfter=6)
+
+    story = []
+    lines = article.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            story.append(Spacer(1, 6))
+        elif line.startswith('# '):
+            story.append(Paragraph(line[2:], title_style))
+        elif line.startswith('## '):
+            story.append(Paragraph(line[3:], head_style))
+        elif line.startswith('### '):
+            story.append(Paragraph(line[4:], head_style))
+        else:
+            line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+            story.append(Paragraph(line, body_style))
+
+    doc.build(story)
+    return tmp.name
+
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+youtube_url = st.text_input("🔗 Enter YouTube Video URL", placeholder="https://youtube.com/watch?v=...")
 
 if st.button("🚀 Generate Article"):
-    if youtube_url:
-        with st.spinner("📥 Fetching Transcript..."):
-            try:
-                transcript = get_transcript(youtube_url)
-            except ValueError as e:
-                st.error(f"❌ {e}")
-                if not (proxy_user and proxy_pass):
-                    st.info(
-                        "💡 **Fix:** Add a WebShare proxy to your Streamlit secrets.\n\n"
-                        "1. Sign up free at https://webshare.io\n"
-                        "2. Go to **Streamlit Cloud → App Settings → Secrets**\n"
-                        "3. Add:\n```\nPROXY_USER = \"your_username\"\nPROXY_PASS = \"your_password\"\n```"
-                    )
-                st.stop()
+    if not youtube_url:
+        st.warning("⚠️ Please enter a YouTube URL.")
+    else:
+        try:
+            yt_key     = st.secrets["YOUTUBE_API_KEY"]
+            gemini_key = st.secrets["GEMINI_API_KEY"]
+        except KeyError as e:
+            st.error(f"❌ Missing secret: {e}. Add it in Streamlit Cloud → Settings → Secrets.")
+            st.stop()
 
-        st.success("✅ Transcript Retrieved Successfully")
-
-        with st.spinner("🤖 Generating AI Article... (may retry if server is busy)"):
+        with st.spinner("📥 Fetching captions via YouTube API..."):
             try:
-                article = generate_summary(transcript)
+                video_id   = extract_video_id(youtube_url)
+                transcript = get_captions(video_id, yt_key)
+                st.success("✅ Captions fetched successfully!")
             except Exception as e:
-                st.error("❌ Failed to generate article after multiple attempts. Please try again in a moment.")
+                st.error(f"❌ {e}")
                 st.stop()
 
-        st.success("✅ Article Generated Successfully")
-
-        pdf_file = generate_pdf(article)
+        with st.spinner("🤖 Generating AI article with Gemini..."):
+            try:
+                article = generate_article(transcript, gemini_key)
+                st.success("✅ Article generated!")
+            except Exception as e:
+                st.error(f"❌ Gemini error: {e}")
+                st.stop()
 
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Words", len(article.split()))
-        with col2:
-            st.metric("Characters", len(article))
-        with col3:
-            st.metric("Pages", max(1, len(article) // 3000))
+        col1.metric("Words", len(article.split()))
+        col2.metric("Characters", len(article))
+        col3.metric("Pages (est.)", max(1, len(article) // 3000))
 
         st.markdown("## 📝 Generated Article")
-        st.markdown(f'<div class="result-box">{article}</div>', unsafe_allow_html=True)
+        st.markdown(article)
 
-        with open(pdf_file, "rb") as f:
-            st.download_button(
-                label="📄 Download PDF",
-                data=f,
-                file_name="AI_Article.pdf",
-                mime="application/pdf"
-            )
+        pdf_path = create_pdf(article)
+        with open(pdf_path, "rb") as f:
+            st.download_button("📄 Download PDF", f, file_name="AI_Article.pdf", mime="application/pdf")
 
         st.balloons()
-    else:
-        st.warning("⚠️ Please Enter a YouTube URL")

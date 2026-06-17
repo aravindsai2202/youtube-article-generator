@@ -1,5 +1,5 @@
-streamlit 
-google-genai 
-youtube-transcript-api 
-python-dotenv 
+streamlit
+google-genai
+youtube-transcript-api>=1.0.0
+python-dotenv
 reportlab

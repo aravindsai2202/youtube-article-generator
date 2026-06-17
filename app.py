@@ -1,5 +1,5 @@
 import streamlit as st
-from google import genai
+from groq import Groq
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -41,8 +41,7 @@ def extract_video_id(url: str) -> str:
 
 
 def get_transcript(video_id: str, supadata_key: str) -> str:
-    """Fetch transcript using Supadata API."""
-    url = f"https://api.supadata.ai/v1/youtube/transcript"
+    url = "https://api.supadata.ai/v1/youtube/transcript"
     headers = {"x-api-key": supadata_key}
     params = {"videoId": video_id, "text": "true"}
 
@@ -59,25 +58,38 @@ def get_transcript(video_id: str, supadata_key: str) -> str:
     elif r.status_code == 404:
         raise ValueError("No transcript found. Try a video with captions enabled.")
     else:
-        raise ValueError(f"Supadata API error: {r.status_code} — {r.text}")
+        raise ValueError(f"Supadata API error: {r.status_code}")
 
 
-def generate_article(transcript: str, gemini_key: str) -> str:
-    client = genai.Client(api_key=gemini_key)
-    prompt = f"""You are a professional content writer. Based on the transcript below, write a well-structured, 
-engaging article with a title, introduction, multiple sections with headings, and a conclusion.
+def generate_article(transcript: str, groq_key: str) -> str:
+    client = Groq(api_key=groq_key)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a professional content writer who writes well-structured, engaging articles."
+            },
+            {
+                "role": "user",
+                "content": f"""Based on the transcript below, write a well-structured engaging article with:
+- A compelling title
+- Introduction
+- Multiple sections with headings
+- A conclusion
+
 Make it informative, professional, and easy to read.
 
 Transcript:
-{transcript[:12000]}
+{transcript[:6000]}
 
 Write the full article now:"""
-
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
+            }
+        ],
+        max_tokens=2000,
+        temperature=0.7
     )
-    return response.text
+    return response.choices[0].message.content
 
 
 def create_pdf(article: str) -> str:
@@ -115,7 +127,7 @@ if st.button("🚀 Generate Article"):
         st.warning("⚠️ Please enter a YouTube URL.")
     else:
         try:
-            gemini_key   = st.secrets["GEMINI_API_KEY"]
+            groq_key     = st.secrets["GROQ_API_KEY"]
             supadata_key = st.secrets["SUPADATA_API_KEY"]
         except KeyError as e:
             st.error(f"❌ Missing secret: {e}")
@@ -130,9 +142,9 @@ if st.button("🚀 Generate Article"):
                 st.error(f"❌ {e}")
                 st.stop()
 
-        with st.spinner("🤖 Generating article with Gemini..."):
+        with st.spinner("🤖 Generating article with Groq AI..."):
             try:
-                article = generate_article(transcript, gemini_key)
+                article = generate_article(transcript, groq_key)
                 st.success("✅ Article generated!")
             except Exception as e:
                 st.error(f"❌ {e}")
